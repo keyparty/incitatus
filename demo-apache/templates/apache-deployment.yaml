@@ -1,0 +1,159 @@
+apiVersion: extensions/v1beta1
+kind: ReplicaSet
+metadata:
+  name: server
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: server
+      annotations:
+        vaultproject.io/policies: "default,microservice"
+        vaultproject.io/ttl: "24h"
+        pod.alpha.kubernetes.io/init-containers: '[
+          {
+            "name": "vault-init",
+            "image": "docker.io/keyparty/vault-init:0.0.1",
+            "imagePullPolicy": "Always",
+            "env": [
+              {
+                "name": "POD_NAME",
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.name"
+                  }
+                }
+              },
+              {
+                "name": "POD_NAMESPACE",
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.namespace"
+                  }
+                }
+              },
+              {
+                "name": "VAULT_ADDR",
+                "value": "http://vault.incitatus.svc.cluster.local:8200"
+              },
+              {
+                "name": "VAULT_CONTROLLER_ADDR",
+                "value": "http://vault-controller.incitatus.svc.cluster.local"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "vault-token",
+                "mountPath": "/var/run/secrets/vaultproject.io"
+              }
+            ]
+          }
+        ]'
+    spec:
+      containers:
+        - name: caligula
+          image: "docker.io/keyparty/caligula:0.0.1"
+          imagePullPolicy: Always
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          args:
+            - "-cluster-domain=cluster.local"
+            - "-ip=$(POD_IP)"
+            - "-name=$(POD_NAME)"
+            - "-namespace=$(POD_NAMESPACE)"
+            - "-server-pki-path=/pki/issue/server"
+            - "-server-pki-ttl=60s"
+            - "-service-name=server"
+            - "-vault-addr=http://vault.incitatus.svc.cluster.local:8200"
+            - "-write-cert-path=/var/run/secrets/keyparty"
+          volumeMounts:
+            - name: vault-token
+              mountPath: "/var/run/secrets/vaultproject.io"
+            - name: tls-server-certs
+              mountPath: "/var/run/secrets/keyparty"
+        - name: apache-service
+          image: "docker.io/httpd:latest"
+          imagePullPolicy: Always
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          command:
+            - httpd
+            - -DFOREGROUND
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - apachectl
+                  - -k
+                  - graceful-stop
+          livenessProbe:
+            periodSeconds: 20
+            exec:
+              command:
+              - bash
+              - -c
+              - |
+                set -ex
+                WATCH_DIR=/var/run/secrets/keyparty
+                STATE_FILE=/tmp/watcher/current
+                function update_md5 () {
+                  md5sum ${WATCH_DIR}/* > ${STATE_FILE}
+                }
+                if [ ! -f "${STATE_FILE}" ]; then update_md5; fi
+                md5sum -c ${STATE_FILE} || (
+                  update_md5
+                  apachectl -k restart
+                )
+          volumeMounts:
+            - name: tls-server-certs
+              mountPath: /var/run/secrets/keyparty
+            - name: tls-watcher-tmp
+              mountPath: /tmp/watcher
+            - name: httpd-config
+              mountPath: /usr/local/apache2/conf/httpd.conf
+              subPath: httpd.conf
+            - name: httpd-config
+              mountPath: /usr/local/apache2/conf/extra/httpd-ssl.conf
+              subPath: httpd-ssl.conf
+      volumes:
+        - name: vault-token
+          emptyDir:
+            medium: "Memory"
+        - name: tls-server-certs
+          emptyDir:
+            medium: "Memory"
+        - name: tls-watcher-tmp
+          emptyDir: {}
+        - name: httpd-config
+          configMap:
+            name: apache-config
+            items:
+              - key: httpd.conf
+                path: httpd.conf
+              - key: httpd-ssl.conf
+                path: httpd-ssl.conf

@@ -1,0 +1,122 @@
+apiVersion: extensions/v1beta1
+kind: ReplicaSet
+metadata:
+  name: client
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: client
+      annotations:
+        vaultproject.io/policies: "default,microservice"
+        vaultproject.io/ttl: "24h"
+        pod.alpha.kubernetes.io/init-containers: '[
+          {
+            "name": "vault-init",
+            "image": "docker.io/keyparty/vault-init:0.0.1",
+            "imagePullPolicy": "Always",
+            "env": [
+              {
+                "name": "POD_NAME",
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.name"
+                  }
+                }
+              },
+              {
+                "name": "POD_NAMESPACE",
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.namespace"
+                  }
+                }
+              },
+              {
+                "name": "VAULT_ADDR",
+                "value": "http://vault.incitatus.svc.cluster.local:8200"
+              },
+              {
+                "name": "VAULT_CONTROLLER_ADDR",
+                "value": "http://vault-controller.incitatus.svc.cluster.local"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "vault-token",
+                "mountPath": "/var/run/secrets/vaultproject.io"
+              }
+            ]
+          }
+        ]'
+    spec:
+      containers:
+        - name: client
+          image: "docker.io/keyparty/caligula:0.0.1"
+          imagePullPolicy: Always
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          args:
+            - "-client"
+            - "-client-pki-path=/pki/issue/client"
+            - "-client-pki-ttl=60s"
+            - "-cluster-domain=cluster.local"
+            - "-ip=$(POD_IP)"
+            - "-name=$(POD_NAME)"
+            - "-namespace=$(POD_NAMESPACE)"
+            - "-vault-addr=http://vault.incitatus.svc.cluster.local:8200"
+            - "-write-cert-path=/var/run/secrets/keyparty"
+          volumeMounts:
+            - name: vault-token
+              mountPath: "/var/run/secrets/vaultproject.io"
+            - name: tls-client-cert
+              mountPath: "/var/run/secrets/keyparty"
+        - name: client-container
+          image: "docker.io/keyparty/test-client:0.0.1"
+          imagePullPolicy: Always
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: WATCH_DIR
+              value: /var/run/secrets/keyparty
+          command:
+            - bash
+            - -c
+            - |+
+              set -x
+              while true; do
+                sleep 10
+                date
+                curl --verbose \
+                  --cert $WATCH_DIR/tls.crt \
+                  --key $WATCH_DIR/tls.key \
+                  --cacert $WATCH_DIR/tls.ca \
+                  https://server.$POD_NAMESPACE.svc.cluster.local
+                openssl x509 -in $WATCH_DIR/tls.crt -text -noout
+              done
+          volumeMounts:
+            - name: tls-client-cert
+              mountPath: "/var/run/secrets/keyparty"
+      volumes:
+        - name: vault-token
+          emptyDir:
+            medium: "Memory"
+        - name: tls-client-cert
+          emptyDir:
+            medium: "Memory"
